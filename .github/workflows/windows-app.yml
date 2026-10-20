@@ -1,0 +1,35 @@
+# Skambutis.exe: testai -> PyInstaller -> ar .exe pasileidžia -> artifact "Skambutis-windows"
+name: Windows programa
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/windows-app.yml"]
+  workflow_dispatch:
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"  # lietuviškos raidės Windows konsolėje
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Priklausomybės
+        run: pip install pyinstaller zeroconf miniaudio lameenc numpy requests
+      - name: Testai (be įrenginio)
+        run: python app/test_core.py
+      - name: Skambutis.exe
+        run: pyinstaller --onefile --windowed --name Skambutis --paths app --collect-all zeroconf --hidden-import _cffi_backend app/skambutis.py
+      - name: Ar .exe pasileidžia
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          Start-Process dist/Skambutis.exe -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
+          if (!(Test-Path selftest.txt)) { Write-Error ".exe nepasileido"; exit 1 }
+          Get-Content selftest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Skambutis-windows
+          path: dist/Skambutis.exe
