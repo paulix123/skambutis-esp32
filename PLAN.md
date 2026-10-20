@@ -31,15 +31,15 @@ atnaujinimai (GitHub Releases). Nuotoliniam valdymui – RDP į mokyklos PC.
 
 | PCM5102 | ESP32-S3 |
 |---|---|
-| VIN | 5V |
-| GND | GND |
+| VIN | 5Vin (būtina užlituoti IN-OUT pad'us; iš 3V3 DAC traška ir numuša ESP32 maitinimą) |
+| GND | GND (bet kuris, pvz. dešinėje viršuje) |
 | BCK | GPIO 4 |
 | LCK | GPIO 5 |
 | DIN | GPIO 6 |
-| SCK | GND |
+| SCK | GND (trumpas laidukas ant DAC) |
 
 Neliesti: GPIO 26–37 (flash/octal PSRAM), 0/3/45/46 (strapping), 19/20 (USB), 43/44 (UART0).
-Rezervuota: GPIO 8/9 – I2C RTC'ui.
+I2C RTC (DS3231): SDA = GPIO 8, SCL = GPIO 18 (ne 9 – naujoje plokštėje 9 kontaktas neveikė), VCC = 3V3.
 
 Į PA – **LINE/AUX** įėjimas, ne MIC. Maitinimas – atskiras 5 V/1 A USB adapteris.
 
@@ -83,7 +83,7 @@ WiFi + garso – `Update.rollBack()`. CI (GitHub Actions): `pio test -e native`
 |---|---|---|---|
 | 0 | Litavimas, testinis grojimas iš LittleFS per PA | girdėti, neūžia, WAV ir MP3 | 0.5 |
 | 1 | WiFi (STA+AP portalas), NTP, schedule + testai, skambina pagal config | visą dieną laiku | 1–2 |
-| 2 | Web UI + API + upload + PIN + mDNS + eksportas/importas | viskas keičiama iš naršyklės | 1.5–2 |
+| 2 | Web UI + API + upload (garsumo normalizavimas, MP3 48 kHz) + PIN + mDNS + eksportas/importas | viskas keičiama iš naršyklės | 1.5–2 |
 | 3 | OTA + CI + rollback | push → įrenginys atsinaujina; blogas build grįžta atgal | 1 |
 | 4 | Watchdog, RTC, log, 72 h testas, montavimas | 72 h be priežiūros | 1–1.5 |
 
