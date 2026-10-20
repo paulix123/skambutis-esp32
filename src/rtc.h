@@ -3,6 +3,7 @@
 #include <ctime>
 
 bool rtcBegin(int sda, int scl);          // ar modulis atsako
+bool rtcProbe();                          // ar modulis atsako dabar (prijungtas vėliau)
 bool rtcRead(time_t& utc, bool& lost);    // lost: laikrodis buvo sustojęs (išsekusi baterija / nenustatytas)
 bool rtcWrite(time_t utc);                // įrašo laiką ir išvalo "sustojęs" vėliavėlę
 float rtcTemp();                          // DS3231 vidinis termometras, °C

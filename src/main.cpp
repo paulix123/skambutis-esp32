@@ -18,7 +18,7 @@
 #include "rtc.h"
 #include "schedule.h"
 
-constexpr const char* FW_VERSION = "0.2.0";
+constexpr const char* FW_VERSION = "0.2.1";
 // PCM5102A: BCK, LCK, DIN. SCK -> GND
 constexpr uint8_t I2S_BCK = 4, I2S_LCK = 5, I2S_DIN = 6;
 // DS3231: SDA, SCL; VCC -> 3V3 (ne 5 V)
@@ -591,6 +591,15 @@ void loop() {
   if (ntpSynced) {  // kiekvienas NTP sinchronizavimas (~kas valandą) atnaujina DS3231
     ntpSynced = false;
     if (rtcOk) logf(rtcWrite(time(nullptr)) ? "RTC: atnaujintas iš interneto" : "KLAIDA: RTC įrašymas");
+  }
+  static uint32_t lastRtcCheck = 0;  // laikrodis prijungtas vėliau arba jo laikas buvo sustojęs
+  if (millis() - lastRtcCheck > 60000) {
+    lastRtcCheck = millis();
+    if (!rtcOk && (rtcOk = rtcProbe())) logf("RTC: rastas");
+    time_t t;
+    bool lost;
+    if (rtcOk && time(nullptr) > 1700000000 && rtcRead(t, lost) && lost)
+      logf(rtcWrite(time(nullptr)) ? "RTC: laikas buvo sustojęs – įrašytas iš naujo" : "KLAIDA: RTC įrašymas");
   }
 
   static uint32_t lastTry = 0;

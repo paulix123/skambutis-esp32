@@ -23,10 +23,14 @@ static bool writeRegs(uint8_t reg, const uint8_t* buf, uint8_t n) {
   return Wire.endTransmission() == 0;
 }
 
-bool rtcBegin(int sda, int scl) {
-  Wire.begin(sda, scl);
+bool rtcProbe() {
   Wire.beginTransmission(ADDR);
   return Wire.endTransmission() == 0;
+}
+
+bool rtcBegin(int sda, int scl) {
+  Wire.begin(sda, scl);
+  return rtcProbe();
 }
 
 bool rtcRead(time_t& utc, bool& lost) {
