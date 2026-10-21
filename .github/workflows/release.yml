@@ -1,0 +1,61 @@
+# Leidimas: git tag v0.3.0 && git push origin v0.3.0
+# -> testai, firmware.bin + firmware.json (įrenginiai atsinaujina patys), Skambutis.exe -> GitHub Release
+name: Leidimas
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git describe -> versija
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PlatformIO
+        run: pip install platformio
+      - name: Testai
+        run: pio test -e native
+      - name: firmware.bin
+        run: pio run -e s3
+      - name: firmware.json
+        run: |
+          cp .pio/build/s3/firmware.bin firmware.bin
+          python3 - <<'PY'
+          import hashlib, json, os
+          tag = os.environ["GITHUB_REF_NAME"]
+          data = open("firmware.bin", "rb").read()
+          json.dump({
+              "version": tag.lstrip("v"),
+              "url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}/firmware.bin",
+              "sha256": hashlib.sha256(data).hexdigest(),
+              "size": len(data),
+          }, open("firmware.json", "w"), indent=2)
+          print(open("firmware.json").read())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            firmware.bin
+            firmware.json
+
+  exe:
+    uses: ./.github/workflows/windows-app.yml
+
+  release:
+    needs: [firmware, exe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" firmware/firmware.bin firmware/firmware.json Skambutis-windows/Skambutis.exe
+               --repo "$GITHUB_REPOSITORY" --title "Skambutis $GITHUB_REF_NAME" --generate-notes

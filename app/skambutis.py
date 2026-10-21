@@ -238,13 +238,15 @@ class App(tk.Tk):
         grid = ttk.Frame(f)
         grid.pack(anchor="w")
         for i, (key, txt) in enumerate((("time", "Laikas įrenginyje"), ("next", "Sekantis skambutis"), ("wifi", "WiFi"),
-                                        ("rtc", "Laikrodis (DS3231)"), ("fs", "Vieta garsams"), ("version", "Programos versija"))):
+                                        ("rtc", "Laikrodis (DS3231)"), ("fs", "Vieta garsams"), ("version", "Programos versija"),
+                                        ("update", "Atnaujinimai"))):
             ttk.Label(grid, text=txt + ":").grid(row=i, column=0, sticky="w", pady=2)
             v = tk.StringVar(value="–")
             ttk.Label(grid, textvariable=v).grid(row=i, column=1, sticky="w", padx=10)
             self.dev_info[key] = v
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=16)
+        ttk.Button(row, text="Ieškoti atnaujinimų", command=self.check_update).pack(side="left", padx=(0, 6))
         ttk.Button(row, text="Žurnalas…", command=self.show_log).pack(side="left")
         ttk.Button(row, text="Keisti PIN…", command=self.change_pin).pack(side="left", padx=6)
         ttk.Button(row, text="Atsarginė kopija…", command=self.backup).pack(side="left")
@@ -328,6 +330,7 @@ class App(tk.Tk):
         fs = st["fs"]
         self.dev_info["fs"].set(f"užimta {fs['used'] / 1e6:.1f} iš {fs['total'] / 1e6:.1f} MB")
         self.dev_info["version"].set(st["version"])
+        self.dev_info["update"].set(st.get("update", "–"))
         self.space.set(f"Įrenginyje užimta {fs['used'] / 1e6:.1f} iš {fs['total'] / 1e6:.1f} MB")
 
     # --- config -> laukai ---------------------------------------------------------
@@ -573,6 +576,16 @@ class App(tk.Tk):
             t.pack(fill="both", expand=True)
             t.see("end")
         self.bg(self.dev.log, done, "Gaunamas žurnalas…")
+
+    def check_update(self):
+        if not self.need_device():
+            return
+
+        def done(_):
+            self.dev_info["update"].set("tikrinama…")
+            messagebox.showinfo("Atnaujinimai", "Įrenginys tikrina, ar yra nauja versija. Jei yra – įsidiegs ir persikraus "
+                                                "(~1 min). Rezultatą matysi eilutėje „Atnaujinimai“.")
+        self.bg(self.dev.check_update, done)
 
     def change_pin(self):
         if not self.need_device():

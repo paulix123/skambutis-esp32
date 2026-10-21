@@ -76,6 +76,10 @@ class Device:
     def log(self) -> str:
         return self._req("GET", "/log").text
 
+    def check_update(self):
+        """Įrenginys pats patikrina GitHub leidimus; rezultatas – status()["update"]."""
+        self._req("POST", "/update")
+
     def set_pin(self, new_pin: str):
         self._req("POST", "/pin", json={"pin": new_pin})
         self.headers["X-Pin"] = new_pin

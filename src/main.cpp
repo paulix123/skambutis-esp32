@@ -2,10 +2,15 @@
 // Konfigūruojama per HTTP API vietiniame tinkle (žr. API skyrių žemiau), PIN – antraštė X-Pin.
 // Serial: p - bandomasis skambutis, r - bandomasis "prieš", s - stop, i - būsena (ir PIN),
 //         x - testinė pamoka po 3 min (tik RAM), w - pamiršti WiFi ir perkrauti, t - I2S laidų testas, n - WiFi tinklai,
-//         c - laikrodis (DS3231), T<unix laikas>\n - nustatyti laiką be interneto (sistemos ir DS3231)
+//         c - laikrodis (DS3231), T<unix laikas>\n - nustatyti laiką be interneto (sistemos ir DS3231), u - atnaujinimas
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
+#include <NetworkClientSecure.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
+#include <mbedtls/sha256.h>
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -17,8 +22,13 @@
 #include "Audio.h"
 #include "rtc.h"
 #include "schedule.h"
+#include "version.h"
 
-constexpr const char* FW_VERSION = "0.2.1";
+#ifndef FW_VERSION
+#define FW_VERSION "dev"  // tikrą įrašo tools/version.py (git describe)
+#endif
+// OTA: GitHub leidimas (žyma v*) – firmware.json {version, url, sha256, size} + firmware.bin
+constexpr const char* UPDATE_URL = "https://github.com/paulix123/skambutis-esp32/releases/latest/download/firmware.json";
 // PCM5102A: BCK, LCK, DIN. SCK -> GND
 constexpr uint8_t I2S_BCK = 4, I2S_LCK = 5, I2S_DIN = 6;
 // DS3231: SDA, SCL; VCC -> 3V3 (ne 5 V)
@@ -55,6 +65,8 @@ String pin;
 int leadMs = 200;
 bool rtcOk = false, webStarted = false;
 volatile bool ntpSynced = false;  // nustato SNTP gija, apdoroja loop()
+bool updateRequested = false;
+String updateInfo = "dar netikrinta";
 std::vector<String> logRing;      // paskutinės eilutės API /log
 
 void logf(const char* fmt, ...) {
@@ -201,6 +213,99 @@ void checkBell() {
   ring(h.kind == Bell::Pries, label);
 }
 
+// --- atnaujinimai (OTA) -------------------------------------------------------
+// Nauja versija paleidžiama "nepatvirtinta": jei nulūžta prieš patvirtinimą arba per 10 min neprisijungia
+// prie WiFi – bootloader'is grįžta prie ankstesnės. Patvirtinam patys (žr. loop), todėl:
+bool verifyRollbackLater() { return true; }
+
+bool otaPendingVerify() {
+  esp_ota_img_states_t st;
+  return esp_ota_get_state_partition(esp_ota_get_running_partition(), &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+bool httpsBegin(HTTPClient& http, NetworkClientSecure& client, const String& url) {
+  client.useBuiltinCACertBundle();  // tikrinam, kad tikrai GitHub
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // releases/... -> release-assets.githubusercontent.com
+  http.setTimeout(15000);
+  return http.begin(client, url);
+}
+
+// atsisiunčia ir įrašo į kitą programos vietą; SHA-256 tikrinamas prieš patvirtinant
+bool otaInstall(const String& url, size_t size, String sha) {
+  NetworkClientSecure client;
+  HTTPClient http;
+  if (!httpsBegin(http, client, url)) { updateInfo = "klaida: netinkamas adresas"; return false; }
+  int code = http.GET();
+  if (code != 200) { updateInfo = "klaida: firmware.bin HTTP " + String(code); return false; }
+  int len = http.getSize();
+  if (len <= 0 || (size_t)len != size) { updateInfo = "klaida: blogas dydis " + String(len); return false; }
+  if (!Update.begin(len)) { updateInfo = String("klaida: ") + Update.errorString(); return false; }
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts(&ctx, 0);
+  auto* stream = http.getStreamPtr();
+  static uint8_t buf[4096];
+  size_t done = 0;
+  uint32_t last = millis();
+  while (done < (size_t)len) {
+    size_t n = stream->available();
+    if (n) {
+      n = stream->readBytes(buf, std::min(n, sizeof buf));
+      mbedtls_sha256_update(&ctx, buf, n);
+      if (Update.write(buf, n) != n) break;
+      done += n;
+      last = millis();
+    } else if (millis() - last > 15000) {
+      break;
+    } else {
+      delay(1);
+    }
+  }
+  uint8_t h[32];
+  mbedtls_sha256_finish(&ctx, h);
+  mbedtls_sha256_free(&ctx);
+  char hex[65];
+  for (int i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", h[i]);
+  sha.toLowerCase();
+  if (done != (size_t)len || sha != hex) {
+    Update.abort();
+    updateInfo = done != (size_t)len ? "klaida: atsisiuntimas nutrūko" : "klaida: SHA-256 nesutampa";
+    return false;
+  }
+  if (!Update.end(true)) { updateInfo = String("klaida: ") + Update.errorString(); return false; }
+  return true;
+}
+
+// grąžina false, jei reikia pakartoti greičiau (skambutis netrukus / groja)
+bool checkUpdate() {
+  struct tm tm;
+  if (audio.isRunning()) { updateInfo = "atidėta – groja"; return false; }
+  if (nowLocal(tm)) {
+    int m = tm.tm_hour * 60 + tm.tm_min, nb = nextBell(sched, (tm.tm_wday + 6) % 7, m);
+    if (nb >= 0 && nb - m < 10) { updateInfo = "atidėta – netrukus skambutis"; return false; }
+  }
+  NetworkClientSecure client;
+  HTTPClient http;
+  if (!httpsBegin(http, client, UPDATE_URL)) { updateInfo = "klaida: netinkamas adresas"; return true; }
+  int code = http.GET();
+  if (code == 404) { updateInfo = "leidimų dar nėra"; return true; }
+  if (code != 200) { updateInfo = "klaida: HTTP " + String(code); return true; }
+  JsonDocument d;
+  if (deserializeJson(d, http.getString())) { updateInfo = "klaida: firmware.json"; return true; }
+  http.end();
+  const char* ver = d["version"] | "";
+  if (!newerVer(ver, FW_VERSION)) { updateInfo = String("naujausia (") + ver + ")"; return true; }
+  logf("atnaujinimas: %s -> %s, siunčiama...", FW_VERSION, ver);
+  if (!otaInstall(d["url"] | "", d["size"] | 0, d["sha256"] | "")) {
+    logf("atnaujinimas nepavyko: %s", updateInfo.c_str());
+    return true;
+  }
+  logf("atnaujinimas %s įrašytas – perkraunama", ver);
+  delay(500);
+  ESP.restart();
+  return true;
+}
+
 // --- PIN --------------------------------------------------------------------
 
 bool validPin(const String& p) {
@@ -226,6 +331,7 @@ WiFiManagerParameter* pinParam;  // laukelis WiFi nustatymų puslapyje
 //  POST /upload (multipart "file", .mp3) -> {"file": "/s/xxxxxxxx.mp3"}; į config įtraukti atskirai
 //  POST /play?what=bendras|pries|BALTAS|GELTONAS|RAUDONAS  arba  /play?file=/s/x.mp3
 //  POST /stop        GET /log           POST /pin {"pin": "1234"}
+//  POST /update                         patikrinti/įdiegti atnaujinimą dabar (rezultatas – /status "update")
 // ponytail: sinchroninis WebServer – įkėlimo metu (kelios s) loop() stovi, skambutis gali pavėluoti tiek pat;
 //           jei trukdys – audio į atskirą FreeRTOS užduotį arba AsyncWebServer.
 
@@ -278,6 +384,7 @@ void handleStatus() {
   d["fs"]["used"] = LittleFS.usedBytes();
   d["fs"]["total"] = LittleFS.totalBytes();
   d["playing"] = audio.isRunning();
+  d["update"] = updateInfo;
   sendJson(200, d);
 }
 
@@ -428,6 +535,15 @@ void handlePin() {
   sendJson(200, d);
 }
 
+void handleUpdate() {
+  if (!authed()) return;
+  updateRequested = true;  // tikrina loop(); rezultatas – /status "update"
+  updateInfo = "tikrinama...";
+  JsonDocument d;
+  d["ok"] = true;
+  sendJson(200, d);
+}
+
 void startWeb() {
   const char* headers[] = {"X-Pin", "Content-Length"};
   server.collectHeaders(headers, 2);
@@ -441,6 +557,7 @@ void startWeb() {
   server.on("/stop", HTTP_POST, handleStop);
   server.on("/log", HTTP_GET, handleLog);
   server.on("/pin", HTTP_POST, handlePin);
+  server.on("/update", HTTP_POST, handleUpdate);
   server.onNotFound([] { sendError(404, "nėra tokio adreso"); });
   server.begin();
   if (MDNS.begin(HOSTNAME)) MDNS.addService("skambutis", "tcp", 80);
@@ -485,6 +602,7 @@ void handleSerial() {
     case 's': audio.stopSong(); break;
     case 'i': status(); break;
     case 'c': rtcStatus(); break;
+    case 'u': updateRequested = true; logf("tikrinamas atnaujinimas..."); break;
     case 'T': {  // laikas iš kompiuterio, kai nėra interneto: "T1792411200\n"
       time_t t = strtoll(Serial.readStringUntil('\n').c_str(), nullptr, 10);
       if (t < 1700000000) { logf("blogas laikas"); break; }
@@ -535,6 +653,7 @@ void setup() {
   Audio::audio_info_callback = [](Audio::msg_t m) {
     if (m.e == Audio::evt_eof || strstr(m.msg, "rror")) logf("audio %s: %s", m.s, m.msg);
   };
+  logf("skambutis %s", FW_VERSION);
   if (!LittleFS.begin(true)) logf("KLAIDA: LittleFS");
   audio.setPinout(I2S_BCK, I2S_LCK, I2S_DIN);
   // dešinys -16 dB: garsas girdisi ir per simetrinį PA įėjimą / TRRS ausines (jos praleidžia tik L-R)
@@ -606,6 +725,24 @@ void loop() {
   if (!WiFi.isConnected() && !wm.getConfigPortalActive() && millis() - lastTry > 60000) {
     lastTry = millis();
     WiFi.reconnect();
+  }
+
+  // nauja versija: patvirtinam, kai 2 min veikia ir prisijungė prie WiFi; kitaip po 10 min – atgal į seną
+  static bool pending = otaPendingVerify();
+  if (pending && webStarted && millis() > 120000) {
+    esp_ota_mark_app_valid_cancel_rollback();
+    pending = false;
+    logf("versija %s patvirtinta", FW_VERSION);
+  } else if (pending && millis() > 600000) {
+    logf("versija %s neprisijungė prie WiFi per 10 min – grįžtam prie ankstesnės", FW_VERSION);
+    delay(200);
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+  }
+
+  static uint32_t nextUpdateCheck = 180000;  // pirmas – 3 min po įsijungimo, paskui kas valandą
+  if (!pending && webStarted && (updateRequested || millis() > nextUpdateCheck)) {
+    updateRequested = false;
+    nextUpdateCheck = millis() + (checkUpdate() ? 3600000 : 900000);
   }
 
   if (Serial.available()) handleSerial();
