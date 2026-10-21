@@ -14,7 +14,7 @@
 part = "all";  // "box" | "lid" | "test" | "preview" | "all"
 
 /* [Plokštės] */
-esp = [57, 28];   // ESP32 PCB: ilgis be antenos, plotis (pamatuota)
+esp = [57, 28.5]; // ESP32 PCB: ilgis be antenos, plotis (pamatuota 28, +0.5 po bandymo)
 esp_ant = 6.5;    // modulio antena išsikiša už PCB galo (pamatuota)
 esp_ant_w = 18;   // tarpas ribotuvuose antenai (pamatuota)
 dac = [17.5, 32]; // PCM5102: gylis nuo sienelės (trumpoji kraštinė), ilgis palei sienelę – pamatuota, +0.5 po bandymo
@@ -50,8 +50,8 @@ r = 3;              // kampų apvalinimas
 hold_gap = 0.5;     // tarpas tarp dangčio stulpelio ir DAC plokštės (neleidžia DAC pakilti)
 // DAC įstatomas įstrižai: lizdas į sienelės skylę, galinis kraštas žemyn – spragteli po dviem spaustukais.
 // Guli ant atramų (galinė lentynėlė + dvi priekyje) – juostos po DAC nereikia.
-dac_clip_t = 0.8;     // spaustuko storis – plonesnis lankstesnis (PLA lūžta, jei lenkiamas per daug)
-dac_clip_hook = 0.4;  // kiek kabliukas užeina ant DAC krašto; laikosi per silpnai – 0.6
+dac_clip_t = 1.3;     // spaustuko storis (0.8 lūžo); lūžta – storink, per kietas – plonink
+dac_clip_hook = 0.3;  // kiek kabliukas užeina ant DAC krašto; laikosi per silpnai – 0.5
 
 inner = [max(esp[0] + esp_ant + antenna_free, rtc_back + rtc[0] + rtc_pins + 2), esp[1] + gap + dac[1] + gap + rtc[1]];
 outer = [inner[0] + 2 * wall, inner[1] + 2 * wall];
@@ -108,11 +108,8 @@ module box() {
           }
         }
       }
-      // tarpai aplink spaustukus (kad lankstytųsi) ir plyšys dugne – ilgesnė lanksti dalis
-      for (y = clips) {
-        translate([xe - 1.6, y - 3.6, floor_t]) cube([dac_clip_t + 4, 7.2, inner_h]);
-        translate([xe + 0.15 - 0.6, y - 3.6, 0.6]) cube([dac_clip_t + 1.2, 7.2, floor_t]);
-      }
+      // tarpai aplink spaustukus, kad lankstytųsi (dugne plyšio nėra – 0.6 mm plėvelė lūžo)
+      for (y = clips) translate([xe - 1.6, y - 3.6, floor_t]) cube([dac_clip_t + 4, 7.2, inner_h]);
       // griovelis aplink sieneles, už kurio užsikabina dangčio dantukai
       translate([wall - groove_d, wall - groove_d, floor_t + inner_h - snap_l - 0.3])
         rounded([inner[0] + 2 * groove_d, inner[1] + 2 * groove_d], 3.1, r - wall / 2 + groove_d);
@@ -121,10 +118,10 @@ module box() {
       // 3.5 mm lizdas
       translate([-1, wall + dac_pos[1] + jack_y, z0 + pcb + jack_z]) rotate([0, 90, 0]) cylinder(d = jack_d, h = wall + 2);
     }
-    // DAC spaustukai: plonas stovas nuo dugno apačios + kabliukas su nuožulnia įėjimo puse
+    // DAC spaustukai: stovas nuo dugno + kabliukas su nuožulnia įėjimo puse
     zt = z0 + pcb;  // DAC plokštės viršus
     for (y = clips) {
-      translate([xe + 0.15, y - 3, 0.5]) cube([dac_clip_t, 6, zt + 2.15 - 0.5]);
+      translate([xe + 0.15, y - 3, floor_t - 0.5]) cube([dac_clip_t, 6, zt + 2.15 - floor_t + 0.5]);
       translate([0, y + 3, 0]) rotate([90, 0, 0]) linear_extrude(6)
         polygon([[xe + 0.16, zt + 0.15], [xe - dac_clip_hook, zt + 0.15], [xe - dac_clip_hook, zt + 0.95], [xe + 0.16, zt + 2.15]]);
     }
@@ -148,8 +145,14 @@ module lid() {
         translate([-1, yc - wall - fit - snap_w / 2 - 0.6, -1]) cube([lw[0] + 2, snap_w + 1.2, lip + 2]);
       }
       // stulpelis iki hold_gap virš DAC plokštės; dangtis apverstas per X ašį, tad y veidrodinis
-      translate([dac_post[0] - 1.5, outer[1] - dac_post[1] - 1.5, lid_t - 0.5])
-        cube([3, 3, floor_t + inner_h - (z0 + pcb + hold_gap) + 0.5]);
+      // 3.5 mm storio, ties dangčiu platėja iki 7 mm – ten jis lūžo
+      translate([dac_post[0], outer[1] - dac_post[1], lid_t - 0.5]) {
+        translate([-1.75, -1.75, 0]) cube([3.5, 3.5, floor_t + inner_h - (z0 + pcb + hold_gap) + 0.5]);
+        hull() {
+          translate([-3.5, -3.5, 0]) cube([7, 7, 0.5]);
+          translate([-1.75, -1.75, 0]) cube([3.5, 3.5, 4.5]);
+        }
+      }
       // dantukai; kabliukas: nuožulni įėjimo pusė prie galiuko, 45° užkabinimas – nuimamas patraukus
       for (side = [0, 1]) {
         xo = side ? wall + fit + lw[0] : wall + fit;  // lūpos išorinis paviršius
@@ -166,7 +169,7 @@ module lid() {
     // ventiliacija virš ESP32 (stabilizatorius) ir DAC; antenos galo ir stulpelio nelieskit
     for (i = [0:5]) translate([wall + 20 + i * 6, wall + 5, -1]) cube([2.5, inner[1] - 10, lid_t + 2]);
   }
-  assert(dac_post[0] + 1.5 < wall + 20, "dangčio stulpelis ant ventiliacijos plyšio");
+  assert(dac_post[0] + 3.5 < wall + 20, "dangčio stulpelis ant ventiliacijos plyšio");
 }
 
 // peržiūra: plokštės spalvotais blokais (ESP32 juoda, antena pilka, DAC violetinė, RTC mėlyna, Dupont oranžinė)
