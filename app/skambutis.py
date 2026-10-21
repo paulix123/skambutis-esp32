@@ -16,6 +16,8 @@ import core
 DAYS = ["Pr", "An", "Tr", "Kt", "Pn", "Št", "Sk"]
 HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 LABEL_USE = {v: k for k, v in core.USES.items()}
+ALERT_MODES = {"off": "Išjungta", "log": "Tik įrašyti į žurnalą (negroti)", "play": "Groti signalą automatiškai"}
+LABEL_ALERT = {v: k for k, v in ALERT_MODES.items()}
 SIGNAL_COLORS = {"BALTAS": ("#f4f4f4", "#111"), "GELTONAS": ("#f5c518", "#111"), "RAUDONAS": ("#d93030", "#fff")}
 
 
@@ -230,7 +232,35 @@ class App(tk.Tk):
             tk.Button(row, text=name, bg=bgc, fg=fg, activebackground=bgc, activeforeground=fg, font=("TkDefaultFont", 13, "bold"),
                       width=12, height=2, relief="raised", bd=2, command=lambda n=name: self.signal(n)).pack(side="left", padx=(0, 10))
         ttk.Button(f, text="■ Sustabdyti", command=self.stop).pack(anchor="w")
+
+        box = ttk.LabelFrame(f, text="Automatiniai oro pavojaus perspėjimai (lt72.lt)", padding=10)
+        box.pack(fill="x", pady=(18, 0))
+        row = ttk.Frame(box)
+        row.pack(anchor="w")
+        ttk.Label(row, text="Veiksmas:").pack(side="left")
+        self.alerts_var = tk.StringVar(value=ALERT_MODES["off"])
+        mode = ttk.Combobox(row, textvariable=self.alerts_var, values=list(ALERT_MODES.values()), state="readonly", width=32)
+        mode.pack(side="left", padx=4)
+        mode.bind("<<ComboboxSelected>>", self.alerts_changed)
+        ttk.Label(row, text="Vietovė:").pack(side="left", padx=(16, 4))
+        self.place_var = tk.StringVar(value="Vilniaus")
+        ttk.Entry(row, textvariable=self.place_var, width=14).pack(side="left")
+        self.place_var.trace_add("write", lambda *a: self.opts_changed())
+        self.alert_info = tk.StringVar(value="–")
+        ttk.Label(box, textvariable=self.alert_info).pack(anchor="w", pady=(8, 0))
+        ttk.Label(box, foreground="#555", justify="left", wraplength=780, text=(
+            "Kai kariuomenė paskelbia oro pavojų (GELTONA, RAUDONA) ar jį atšaukia (BALTA) mokyklos vietovei, įrenginys per ~1 min "
+            "sugroja tą patį signalą. Vietovė – kilmininku, kaip pranešimuose: „Vilniaus“ tinka Vilniaus apskričiai ir miestui, "
+            "bet ne Vilniaus rajonui. Tai papildomas perspėjimas – ne vietoj sirenų ir pranešimų telefonuose.")).pack(anchor="w", pady=(4, 0))
         return f
+
+    def alerts_changed(self, _):
+        if LABEL_ALERT[self.alerts_var.get()] == "play" and not messagebox.askyesno(
+                "Automatiniai perspėjimai", "Oro pavojaus signalai skambės per visus garsiakalbius automatiškai, be žmogaus "
+                "patvirtinimo. Ar tai suderinta su mokyklos civilinės saugos planu?", icon="warning"):
+            self.alerts_var.set(ALERT_MODES[(self.cfg or {}).get("alerts", "off")])
+            return
+        self.opts_changed()
 
     def _tab_device(self, parent):
         f = ttk.Frame(parent, padding=16)
@@ -331,6 +361,9 @@ class App(tk.Tk):
         self.dev_info["fs"].set(f"užimta {fs['used'] / 1e6:.1f} iš {fs['total'] / 1e6:.1f} MB")
         self.dev_info["version"].set(st["version"])
         self.dev_info["update"].set(st.get("update", "–"))
+        a = st.get("alerts")
+        if a:
+            self.alert_info.set(f"Paskutinis patikrinimas: {a['info']}   ·   Paskutinis pranešimas: {a.get('last') or '–'}")
         self.space.set(f"Įrenginyje užimta {fs['used'] / 1e6:.1f} iš {fs['total'] / 1e6:.1f} MB")
 
     # --- config -> laukai ---------------------------------------------------------
@@ -344,6 +377,8 @@ class App(tk.Tk):
             v.set(i in c.get("days", []))
         self.vol_var.set(c.get("volume", 21))
         self.lead_var.set(c.get("lead_ms", 200))
+        self.alerts_var.set(ALERT_MODES.get(c.get("alerts", "off"), ALERT_MODES["off"]))
+        self.place_var.set(c.get("alert_place", "Vilniaus"))
         self.loading = False
         self.fill_lessons()
         self.fill_sounds()
@@ -375,6 +410,8 @@ class App(tk.Tk):
         self.cfg["ring_end"] = self.end_on.get()
         self.cfg["days"] = [i for i, v in enumerate(self.day_vars) if v.get()]
         self.cfg["volume"] = int(self.vol_var.get())
+        self.cfg["alerts"] = LABEL_ALERT[self.alerts_var.get()]
+        self.cfg["alert_place"] = self.place_var.get().strip()
         self.mark_dirty()
 
     # --- pamokos ----------------------------------------------------------------

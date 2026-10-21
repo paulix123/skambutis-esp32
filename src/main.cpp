@@ -3,7 +3,8 @@
 // Serial: p - bandomasis skambutis, r - bandomasis "prieš", s - stop, i - būsena (ir PIN),
 //         x - testinė pamoka po 3 min (tik RAM), w - pamiršti WiFi ir perkrauti, t - I2S laidų testas, n - WiFi tinklai,
 //         c - laikrodis (DS3231), T<unix laikas>\n - nustatyti laiką be interneto (sistemos ir DS3231), u - atnaujinimas,
-//         b - būsenos eilutė, H - watchdog testas (užstringa tyčia)
+//         b - būsenos eilutė, H - watchdog testas (užstringa tyčia),
+//         A<id>\n - perspėjimai: laikyti matytais iki lt72.lt įrašo <id> (bandymui – vėl apdoroti naujesnius)
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <vector>
 #include "Audio.h"
+#include "alerts.h"
 #include "rtc.h"
 #include "schedule.h"
 #include "version.h"
@@ -41,11 +43,16 @@ constexpr const char* AP_NAME = "Skambutis-setup";
 // ponytail: AP slaptažodis kode (repo viešas); portalas atsiranda tik be WiFi, API saugo atskiras PIN
 constexpr const char* AP_PASS = "skambutis";
 const char* SIGNALS[] = {"BALTAS", "GELTONAS", "RAUDONAS"};
+// Oro pavojaus pranešimai: lt72.lt (PAGD) kategorija 49 „Išsiųsti perspėjimo pranešimai“. RSS Cloudflare laiko iki 4 h,
+// todėl WordPress REST + unikalus parametras (&t=) – visada šviežia. Lygis BALTA/GELTONA/RAUDONA = SIGNALS indeksas.
+constexpr const char* ALERTS_URL = "https://lt72.lt/wp-json/wp/v2/posts?categories=49&per_page=10&_fields=id,date_gmt,content";
+const char* LEVELS[] = {"BALTA", "GELTONA", "RAUDONA"};
 
 // tas pats, kas skambutis.py DEFAULT: 8 pamokos po 45 min nuo 08:30.
 // sounds[].use: bendras (pradžia/pabaiga) | pries | BALTAS | GELTONAS | RAUDONAS | off
 const char* DEFAULT_CONFIG = R"({
   "pre_minutes": 2, "lead_ms": 200, "ring_end": true, "volume": 21, "days": [0, 1, 2, 3, 4],
+  "alerts": "off", "alert_place": "Vilniaus",
   "lessons": [
     {"start": "08:30", "end": "09:15"}, {"start": "09:25", "end": "10:10"},
     {"start": "10:20", "end": "11:05"}, {"start": "11:15", "end": "12:00"},
@@ -69,6 +76,9 @@ bool rtcOk = false, webStarted = false;
 volatile bool ntpSynced = false;  // nustato SNTP gija, apdoroja loop()
 bool updateRequested = false;
 String updateInfo = "dar netikrinta";
+String alertsMode = "off", alertPlace = "Vilniaus";  // alerts: off | log (tik žurnalas) | play (groti signalą)
+String alertInfo = "dar netikrinta", alertLast;
+uint32_t alertId = 0;  // paskutinis matytas lt72.lt įrašas (NVS) – senesni niekada negrojami
 bool fsOk = false;                // žurnalas į failą tik kai LittleFS paruoštas
 constexpr const char* LOG_FILE = "/log.txt";
 constexpr const char* LOG_OLD = "/log.old";
@@ -110,6 +120,10 @@ bool applyConfig(JsonDocument& doc, String& err) {
   if (pre < 0 || pre > 30) { err = "pre_minutes turi būti 0–30"; return false; }
   if (lead < 0 || lead > 5000) { err = "lead_ms turi būti 0–5000"; return false; }
   if (vol < 0 || vol > 21) { err = "volume turi būti 0–21"; return false; }
+  String am = doc["alerts"] | "off", ap = doc["alert_place"] | "Vilniaus";
+  ap.trim();
+  if (am != "off" && am != "log" && am != "play") { err = "alerts: off | log | play"; return false; }
+  if (ap.length() < 3 || ap.length() > 40) { err = "alert_place: vietovė kilmininku, pvz. Vilniaus"; return false; }
   Schedule s;
   s.preMinutes = pre;
   s.ringEnd = doc["ring_end"] | true;
@@ -141,6 +155,8 @@ bool applyConfig(JsonDocument& doc, String& err) {
   }
   sched = s;
   leadMs = lead;
+  alertsMode = am;
+  alertPlace = ap;
   audio.setVolume(vol);
   poolPries = pp;
   poolBendras = pb;
@@ -404,6 +420,9 @@ void handleStatus() {
   d["fs"]["total"] = LittleFS.totalBytes();
   d["playing"] = audio.isRunning();
   d["update"] = updateInfo;
+  d["alerts"]["mode"] = alertsMode;
+  d["alerts"]["info"] = alertsMode == "off" ? "išjungta" : alertInfo;
+  d["alerts"]["last"] = alertLast;
   sendJson(200, d);
 }
 
@@ -602,6 +621,65 @@ void startWeb() {
 
 void heartbeat();
 
+// Nauji oro pavojaus pranešimai (id > alertId) mokyklos vietovei: "play" – groja tą patį signalą, "log" – tik įrašo.
+// Per vieną patikrinimą keli (GELTONA -> RAUDONA) – groja naujausią. Senesnis nei 15 min – negroja (po elektros dingimo).
+void checkAlerts() {
+  char hm[8] = "--:--";
+  struct tm tm;
+  if (nowLocal(tm)) strftime(hm, sizeof hm, "%H:%M", &tm);
+  NetworkClientSecure client;
+  HTTPClient http;
+  client.useBuiltinCACertBundle();
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  if (!http.begin(client, String(ALERTS_URL) + "&t=" + millis())) { alertInfo = "klaida: adresas"; return; }
+  int code = http.GET();
+  if (code != 200) { alertInfo = String("klaida: HTTP ") + code + ", " + hm; return; }
+  JsonDocument filter, d;
+  filter[0]["id"] = true;
+  filter[0]["date_gmt"] = true;
+  filter[0]["content"]["rendered"] = true;
+  if (deserializeJson(d, http.getString(), DeserializationOption::Filter(filter)) || !d.is<JsonArray>()) {
+    alertInfo = String("klaida: netinkamas atsakymas, ") + hm;
+    return;
+  }
+  alertInfo = String("gerai, ") + hm;
+  JsonArray a = d.as<JsonArray>();
+  uint32_t newest = alertId;
+  for (JsonObject x : a) newest = std::max(newest, (uint32_t)(x["id"] | 0));
+  if (alertId == 0) {  // pirmas kartas: esami pranešimai jau praėję
+    alertId = newest;
+    prefs.putUInt("alert_id", alertId);
+    logf("perspėjimai: stebima lt72.lt nuo #%u", alertId);
+    return;
+  }
+  int play = -1;
+  for (int i = a.size() - 1; i >= 0; i--) {  // REST – naujausi pirmi; apdorojam nuo seniausio
+    JsonObject x = a[i];
+    uint32_t id = x["id"] | 0;
+    if (id <= alertId) continue;
+    std::string html = x["content"]["rendered"] | "";
+    int lvl = alertLevel(html);
+    if (lvl < 0) continue;  // ne oro pavojus: vėjas, policija, sirenų patikrinimas
+    std::string area = alertArea(html);
+    int y, mo, dd, hh, mi, ss;
+    const char* g = x["date_gmt"] | "";
+    time_t sent = sscanf(g, "%d-%d-%dT%d:%d:%d", &y, &mo, &dd, &hh, &mi, &ss) == 6 ? utcToEpoch(y, mo, dd, hh, mi, ss) : 0;
+    bool ours = areaMatches(area, alertPlace.c_str()), fresh = time(nullptr) - sent < 900;
+    const char* act = !ours ? "ne mūsų vietovė" : !fresh ? "senas – negrojama" : alertsMode == "play" ? "groja signalas" : "tik žurnalas";
+    logf("perspėjimas #%u: %s, %s – %s", id, LEVELS[lvl], area.c_str(), act);
+    char when[24] = "";
+    struct tm st;
+    strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime_r(&sent, &st));
+    alertLast = String(when) + " " + LEVELS[lvl] + " – " + area.c_str() + (ours ? "" : " (ne mūsų)");
+    if (ours && fresh) play = lvl;
+  }
+  if (newest != alertId) prefs.putUInt("alert_id", alertId = newest);
+  if (play < 0 || alertsMode != "play") return;
+  if (signalFile[play].isEmpty()) logf("perspėjimas: %s garsas nepriskirtas – negroja", SIGNALS[play]);
+  else playFile(signalFile[play], SIGNALS[play], true);
+}
+
 void rtcStatus() {
   time_t t;
   bool lost;
@@ -642,6 +720,10 @@ void handleSerial() {
       logf("watchdog testas: užstringu tyčia...");
       while (true) delay(1);
     case 'u': updateRequested = true; logf("tikrinamas atnaujinimas..."); break;
+    case 'A':
+      prefs.putUInt("alert_id", alertId = strtoul(Serial.readStringUntil('\n').c_str(), nullptr, 10));
+      logf("perspėjimai: matyti iki #%u", alertId);
+      break;
     case 'T': {  // laikas iš kompiuterio, kai nėra interneto: "T1792411200\n"
       time_t t = strtoll(Serial.readStringUntil('\n').c_str(), nullptr, 10);
       if (t < 1700000000) { logf("blogas laikas"); break; }
@@ -727,6 +809,7 @@ void setup() {
 
   prefs.begin("skambutis");
   pin = prefs.getString("pin", "");
+  alertId = prefs.getUInt("alert_id", 0);
   if (!validPin(pin)) {
     char p[7];
     snprintf(p, sizeof p, "%06lu", (unsigned long)(esp_random() % 1000000));
@@ -814,6 +897,21 @@ void loop() {
   if (millis() > nextHeartbeat) {
     nextHeartbeat += 3600000;
     heartbeat();
+  }
+
+  // perspėjimai kas 30 s; ne grojant (užklausa stabdo loop – trūkinėtų garsas) ir ne paskutines 15 s prieš skambutį
+  static uint32_t nextAlertCheck = 60000;
+  if (alertsMode != "off" && webStarted && WiFi.status() == WL_CONNECTED && millis() > nextAlertCheck && !audio.isRunning()) {
+    struct tm tm;
+    bool soon = false;
+    if (nowLocal(tm)) {
+      int m = tm.tm_hour * 60 + tm.tm_min, nb = nextBell(sched, (tm.tm_wday + 6) % 7, m);
+      soon = nb == m + 1 && tm.tm_sec >= 45;
+    }
+    if (!soon) {
+      nextAlertCheck = millis() + 30000;
+      checkAlerts();
+    }
   }
 
   static uint32_t nextUpdateCheck = 180000;  // pirmas – 3 min po įsijungimo, paskui kas valandą

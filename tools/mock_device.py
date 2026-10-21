@@ -12,6 +12,7 @@ LESSONS = [("08:30", "09:15"), ("09:25", "10:10"), ("10:20", "11:05"), ("11:15",
            ("12:20", "13:05"), ("13:25", "14:10"), ("14:20", "15:05"), ("15:15", "16:00")]
 CONFIG = {
     "pre_minutes": 2, "lead_ms": 200, "ring_end": True, "volume": 21, "days": [0, 1, 2, 3, 4],
+    "alerts": "play", "alert_place": "Vilniaus",
     "lessons": [{"start": a, "end": b} for a, b in LESSONS],
     "sounds": [
         {"file": "/s/1a2b3c4d.mp3", "name": "Mokyklos skambutis", "use": "bendras"},
@@ -25,12 +26,13 @@ CONFIG = {
 SIZES = {"/s/1a2b3c4d.mp3": 196608, "/s/5e6f7a8b.mp3": 228352, "/s/9c0d1e2f.mp3": 312320,
          "/s/3a4b5c6d.mp3": 298496, "/s/7e8f9a0b.mp3": 305152, "/s/c1d2e3f4.mp3": 401408}
 STATUS = {
-    "version": "0.4.0", "uptime_s": 86400, "time_ok": True, "time": "2026-10-21 11:42:22", "next_bell": "12:00",
+    "version": "0.5.0", "uptime_s": 86400, "time_ok": True, "time": "2026-10-21 11:42:22", "next_bell": "12:00",
     "wifi": {"ssid": "Sokratus", "rssi": -46, "ip": "192.168.100.40"},
     "rtc": {"ok": True, "lost": False, "temp": 24.5}, "fs": {"used": 1777664, "total": 10354688},
-    "playing": False, "update": "naujausia (0.4.0)",
+    "playing": False, "update": "naujausia (0.5.0)",
+    "alerts": {"mode": "play", "info": "gerai, 11:42", "last": "2026-10-03 09:48 GELTONA – Vilniaus apskritis"},
 }
-LOG = """2026-10-21 07:58:03 skambutis v0.4.0 – įsijungė: įjungtas maitinimas
+LOG = """2026-10-21 07:58:03 skambutis v0.5.0 – įsijungė: įjungtas maitinimas
 2026-10-21 07:58:03 config: /config.json, 8 pamokų, prieš 2 min
 2026-10-21 07:58:03 RTC: laikas nustatytas iš laikrodžio
 2026-10-21 07:58:05 WiFi: 192.168.100.40
@@ -38,11 +40,11 @@ LOG = """2026-10-21 07:58:03 skambutis v0.4.0 – įsijungė: įjungtas maitinim
 2026-10-21 07:58:09 RTC: atnaujintas iš interneto
 2026-10-21 08:27:59 1 pam. -2 min: groja /s/5e6f7a8b.mp3
 2026-10-21 08:29:59 1 pam. pradžia: groja /s/1a2b3c4d.mp3
-2026-10-21 08:58:03 būsena: veikia 1 h, heap 151200 (min 145540), WiFi -46 dBm, RTC 24.5 °C, v0.4.0
+2026-10-21 08:58:03 būsena: veikia 1 h, heap 151200 (min 145540), WiFi -46 dBm, RTC 24.5 °C, v0.5.0
 2026-10-21 09:14:59 1 pam. pabaiga: groja /s/1a2b3c4d.mp3
 2026-10-21 09:22:59 2 pam. -2 min: groja /s/5e6f7a8b.mp3
 2026-10-21 09:24:59 2 pam. pradžia: groja /s/1a2b3c4d.mp3
-2026-10-21 09:58:03 būsena: veikia 2 h, heap 151196 (min 145540), WiFi -47 dBm, RTC 24.5 °C, v0.4.0
+2026-10-21 09:58:03 būsena: veikia 2 h, heap 151196 (min 145540), WiFi -47 dBm, RTC 24.5 °C, v0.5.0
 2026-10-21 10:09:59 2 pam. pabaiga: groja /s/1a2b3c4d.mp3
 2026-10-21 10:17:59 3 pam. -2 min: groja /s/5e6f7a8b.mp3
 2026-10-21 10:19:59 3 pam. pradžia: groja /s/1a2b3c4d.mp3
