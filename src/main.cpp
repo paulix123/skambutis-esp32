@@ -616,7 +616,8 @@ void rtcStatus() {
 void status() {
   struct tm tm;
   bool synced = nowLocal(tm);
-  logf("versija %s, PIN %s", FW_VERSION, pin.c_str());
+  logf("versija %s", FW_VERSION);
+  Serial.printf("PIN %s\n", pin.c_str());  // ne į žurnalą: jis siunčiamas laiškais
   logf("WiFi: %s %s, RSSI %d dBm, portalas %s", WiFi.isConnected() ? "prisijungta" : "NEPRISIJUNGTA",
        WiFi.localIP().toString().c_str(), WiFi.RSSI(), wm.getConfigPortalActive() ? "ĮJUNGTAS" : "išjungtas");
   if (!synced) logf("laikas nesinchronizuotas – skambučiai neveikia");
@@ -730,7 +731,8 @@ void setup() {
     char p[7];
     snprintf(p, sizeof p, "%06lu", (unsigned long)(esp_random() % 1000000));
     savePin(p);
-    logf("sugeneruotas PIN %s – pakeisti galima WiFi nustatymų puslapyje arba programoje", p);
+    logf("sugeneruotas naujas PIN (rodomas tik USB prievade) – pakeisti galima WiFi nustatymų puslapyje arba programoje");
+    Serial.printf("PIN %s\n", p);
   }
 
   sntp_set_time_sync_notification_cb([](struct timeval*) { ntpSynced = true; });  // SNTP paleidžia startWeb()
