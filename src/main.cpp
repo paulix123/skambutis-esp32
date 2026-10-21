@@ -215,8 +215,9 @@ void checkBell() {
 
 // --- atnaujinimai (OTA) -------------------------------------------------------
 // Nauja versija paleidžiama "nepatvirtinta": jei nulūžta prieš patvirtinimą arba per 10 min neprisijungia
-// prie WiFi – bootloader'is grįžta prie ankstesnės. Patvirtinam patys (žr. loop), todėl:
-bool verifyRollbackLater() { return true; }
+// prie WiFi – bootloader'is grįžta prie ankstesnės. Patvirtinam patys (žr. loop), todėl branduolio
+// silpną C funkciją pakeičiam savo – būtinai extern "C", kitaip C++ vardas nesutampa ir lieka numatytoji
+extern "C" bool verifyRollbackLater() { return true; }
 
 bool otaPendingVerify() {
   esp_ota_img_states_t st;
