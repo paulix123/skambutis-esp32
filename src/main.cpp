@@ -2,7 +2,8 @@
 // Konfigūruojama per HTTP API vietiniame tinkle (žr. API skyrių žemiau), PIN – antraštė X-Pin.
 // Serial: p - bandomasis skambutis, r - bandomasis "prieš", s - stop, i - būsena (ir PIN),
 //         x - testinė pamoka po 3 min (tik RAM), w - pamiršti WiFi ir perkrauti, t - I2S laidų testas, n - WiFi tinklai,
-//         c - laikrodis (DS3231), T<unix laikas>\n - nustatyti laiką be interneto (sistemos ir DS3231), u - atnaujinimas
+//         c - laikrodis (DS3231), T<unix laikas>\n - nustatyti laiką be interneto (sistemos ir DS3231), u - atnaujinimas,
+//         b - būsenos eilutė, H - watchdog testas (užstringa tyčia)
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
@@ -10,6 +11,7 @@
 #include <NetworkClientSecure.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 #include <mbedtls/sha256.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -67,7 +69,10 @@ bool rtcOk = false, webStarted = false;
 volatile bool ntpSynced = false;  // nustato SNTP gija, apdoroja loop()
 bool updateRequested = false;
 String updateInfo = "dar netikrinta";
-std::vector<String> logRing;      // paskutinės eilutės API /log
+bool fsOk = false;                // žurnalas į failą tik kai LittleFS paruoštas
+constexpr const char* LOG_FILE = "/log.txt";
+constexpr const char* LOG_OLD = "/log.old";
+constexpr size_t LOG_MAX = 64 * 1024;  // tiek pasiekus – log.txt -> log.old (iš viso ~128 KB, ~2–3 savaitės)
 
 void logf(const char* fmt, ...) {
   char msg[160], ts[24] = "--:--:--";
@@ -79,8 +84,16 @@ void logf(const char* fmt, ...) {
   struct tm tm;
   if (now > 1700000000) strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime_r(&now, &tm));
   Serial.printf("%s %s\n", ts, msg);
-  if (logRing.size() >= 100) logRing.erase(logRing.begin());
-  logRing.push_back(String(ts) + " " + msg);
+  if (!fsOk) return;
+  File f = LittleFS.open(LOG_FILE, "a");  // išlieka po perkrovimo / dingus elektrai
+  if (!f) return;
+  f.printf("%s %s\n", ts, msg);
+  bool full = f.size() > LOG_MAX;
+  f.close();
+  if (full) {
+    LittleFS.remove(LOG_OLD);
+    LittleFS.rename(LOG_FILE, LOG_OLD);
+  }
 }
 
 // --- konfigūracija ----------------------------------------------------------
@@ -254,6 +267,7 @@ bool otaInstall(const String& url, size_t size, String sha) {
       n = stream->readBytes(buf, std::min(n, sizeof buf));
       mbedtls_sha256_update(&ctx, buf, n);
       if (Update.write(buf, n) != n) break;
+      esp_task_wdt_reset();
       done += n;
       last = millis();
     } else if (millis() - last > 15000) {
@@ -443,6 +457,7 @@ String upPath, upErr;
 File upFile;
 
 void handleUploadChunk() {
+  esp_task_wdt_reset();
   HTTPUpload& u = server.upload();
   switch (u.status) {
     case UPLOAD_FILE_START: {
@@ -517,11 +532,17 @@ void handleStop() {
   sendJson(200, d);
 }
 
-void handleLog() {
+void handleLog() {  // log.old + log.txt, seniausi viršuje
   if (!authed()) return;
-  String out;
-  for (const String& l : logRing) out += l + "\n";
-  server.send(200, "text/plain; charset=utf-8", out);
+  File a = LittleFS.open(LOG_OLD), b = LittleFS.open(LOG_FILE);
+  server.setContentLength((a ? a.size() : 0) + (b ? b.size() : 0));
+  server.send(200, "text/plain; charset=utf-8", "");
+  static uint8_t buf[1024];
+  for (File* f : {&a, &b})
+    while (*f && f->available()) {
+      size_t n = f->read(buf, sizeof buf);
+      server.sendContent((const char*)buf, n);
+    }
 }
 
 void handlePin() {
@@ -569,6 +590,8 @@ void startWeb() {
 
 // --- serial -----------------------------------------------------------------
 
+void heartbeat();
+
 void rtcStatus() {
   time_t t;
   bool lost;
@@ -603,6 +626,10 @@ void handleSerial() {
     case 's': audio.stopSong(); break;
     case 'i': status(); break;
     case 'c': rtcStatus(); break;
+    case 'b': heartbeat(); break;
+    case 'H':  // watchdog testas: užstrigti tyčia
+      logf("watchdog testas: užstringu tyčia...");
+      while (true) delay(1);
     case 'u': updateRequested = true; logf("tikrinamas atnaujinimas..."); break;
     case 'T': {  // laikas iš kompiuterio, kai nėra interneto: "T1792411200\n"
       time_t t = strtoll(Serial.readStringUntil('\n').c_str(), nullptr, 10);
@@ -649,13 +676,39 @@ void handleSerial() {
 
 // --- setup / loop -----------------------------------------------------------
 
+const char* resetReason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "įjungtas maitinimas";
+    case ESP_RST_SW: return "programinis perkrovimas (atnaujinimas / komanda)";
+    case ESP_RST_PANIC: return "PROGRAMOS KLAIDA (panic)";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "WATCHDOG – programa buvo užstrigusi";
+    case ESP_RST_BROWNOUT: return "ĮTAMPOS KRITIMAS (brownout)";
+    case ESP_RST_EXT: return "RST mygtukas / USB";
+    case ESP_RST_USB: return "USB";
+    default: return "kita";
+  }
+}
+
+void heartbeat() {  // kas valandą – 72 h testui ir gedimų paieškai
+  time_t t;
+  bool lost;
+  float temp = rtcOk && rtcRead(t, lost) ? rtcTemp() : NAN;
+  logf("būsena: veikia %lu h, heap %u (min %u), WiFi %d dBm, RTC %.1f °C, %s", millis() / 3600000UL, ESP.getFreeHeap(),
+       ESP.getMinFreeHeap(), WiFi.isConnected() ? WiFi.RSSI() : 0, temp, FW_VERSION);
+}
+
 void setup() {
   Serial.begin(115200);
+  setenv("TZ", TZ_VILNIUS, 1);  // po programinio perkrovimo laikas jau yra – žurnale iš karto vietinis, ne UTC
+  tzset();
   Audio::audio_info_callback = [](Audio::msg_t m) {
     if (m.e == Audio::evt_eof || strstr(m.msg, "rror")) logf("audio %s: %s", m.s, m.msg);
   };
-  logf("skambutis %s", FW_VERSION);
-  if (!LittleFS.begin(true)) logf("KLAIDA: LittleFS");
+  fsOk = LittleFS.begin(true);
+  logf("skambutis %s – įsijungė: %s", FW_VERSION, resetReason());
+  if (!fsOk) logf("KLAIDA: LittleFS");
   audio.setPinout(I2S_BCK, I2S_LCK, I2S_DIN);
   // dešinys -16 dB: garsas girdisi ir per simetrinį PA įėjimą / TRRS ausines (jos praleidžia tik L-R)
   audio.setBalance(16.0f);
@@ -699,9 +752,15 @@ void setup() {
   wm.setConfigPortalTimeout(300);
   if (wm.autoConnect(AP_NAME, AP_PASS)) logf("WiFi: %s", WiFi.localIP().toString().c_str());
   else logf("WiFi neprisijungta – nustatymai per tinklą %s, http://192.168.4.1", AP_NAME);
+
+  // watchdog: jei loop() užstringa ilgiau nei 60 s – perkrauna (ilgiausi darbai: OTA ~40 s, maitinamas viduje)
+  esp_task_wdt_config_t wdt = {.timeout_ms = 60000, .idle_core_mask = 0, .trigger_panic = true};
+  if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
+  esp_task_wdt_add(nullptr);
 }
 
 void loop() {
+  esp_task_wdt_reset();
   audio.loop();
   wm.process();
   checkBell();
@@ -738,6 +797,12 @@ void loop() {
     logf("versija %s neprisijungė prie WiFi per 10 min – grįžtam prie ankstesnės", FW_VERSION);
     delay(200);
     esp_ota_mark_app_invalid_rollback_and_reboot();
+  }
+
+  static uint32_t nextHeartbeat = 3600000;
+  if (millis() > nextHeartbeat) {
+    nextHeartbeat += 3600000;
+    heartbeat();
   }
 
   static uint32_t nextUpdateCheck = 180000;  // pirmas – 3 min po įsijungimo, paskui kas valandą
