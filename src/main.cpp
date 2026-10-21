@@ -630,6 +630,7 @@ void checkAlerts() {
   NetworkClientSecure client;
   HTTPClient http;
   client.useBuiltinCACertBundle();
+  client.setHandshakeTimeout(5);  // s; numatyta 120 – silpnas WiFi užlaikytų loop() (ir watchdog)
   http.setConnectTimeout(5000);
   http.setTimeout(5000);
   if (!http.begin(client, String(ALERTS_URL) + "&t=" + millis())) { alertInfo = "klaida: adresas"; return; }
@@ -899,14 +900,15 @@ void loop() {
     heartbeat();
   }
 
-  // perspėjimai kas 30 s; ne grojant (užklausa stabdo loop – trūkinėtų garsas) ir ne paskutines 15 s prieš skambutį
+  // perspėjimai kas 30 s; ne grojant (užklausa stabdo loop – trūkinėtų garsas) ir ne paskutinę minutę prieš skambutį:
+  // su silpnu WiFi (DNS + TLS + skaitymas) užklausa gali trukti ~30 s, o skambutis turi pasigirsti tiksliai
   static uint32_t nextAlertCheck = 60000;
   if (alertsMode != "off" && webStarted && WiFi.status() == WL_CONNECTED && millis() > nextAlertCheck && !audio.isRunning()) {
     struct tm tm;
     bool soon = false;
     if (nowLocal(tm)) {
       int m = tm.tm_hour * 60 + tm.tm_min, nb = nextBell(sched, (tm.tm_wday + 6) % 7, m);
-      soon = nb == m + 1 && tm.tm_sec >= 45;
+      soon = nb == m + 1;
     }
     if (!soon) {
       nextAlertCheck = millis() + 30000;
