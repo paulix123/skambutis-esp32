@@ -183,8 +183,11 @@ void removeUnusedSounds(JsonDocument& doc) {
 
 // --- grojimas ir tvarkaraštis -------------------------------------------------
 
-void playFile(const String& f, const char* label) {
+bool signalOn = false;  // groja civilinės saugos signalas – tvarkaraščio skambutis jo nenutraukia
+
+void playFile(const String& f, const char* label, bool signal = false) {
   logf("%s: groja %s", label, f.c_str());
+  signalOn = signal;
   audio.connecttoFS(LittleFS, f.c_str());
 }
 
@@ -223,6 +226,7 @@ void checkBell() {
     case Bell::Pradzia: snprintf(label, sizeof label, "%d pam. pradžia", h.lesson); break;
     case Bell::Pabaiga: snprintf(label, sizeof label, "%d pam. pabaiga", h.lesson); break;
   }
+  if (signalOn && audio.isRunning()) { logf("%s: praleista – groja signalas", label); return; }
   ring(h.kind == Bell::Pries, label);
 }
 
@@ -516,7 +520,7 @@ void handlePlay() {
     int i = signalIndex(what);
     if (i < 0) return sendError(400, "what: bendras | pries | BALTAS | GELTONAS | RAUDONAS");
     if (signalFile[i].isEmpty()) return sendError(404, what + " garsas nepriskirtas");
-    playFile(signalFile[i], SIGNALS[i]);
+    playFile(signalFile[i], SIGNALS[i], true);
   }
   JsonDocument d;
   d["ok"] = true;
@@ -582,6 +586,12 @@ void startWeb() {
   server.on("/update", HTTP_POST, handleUpdate);
   server.onNotFound([] { sendError(404, "nėra tokio adreso"); });
   server.begin();
+  // Arduino core 3.3: pirmas hostByName po IP gavimo kviečia dns_clear_cache() be TCPIP užrakto. Jei tuo metu
+  // SNTP laukia DNS atsakymo – lwIP assert ir perkrovimas (atnaujinimų tikrinimas). Todėl talpyklą išvalom
+  // dabar ("localhost" – be tinklo), o SNTP paleidžiam tik po to.
+  IPAddress lo;
+  WiFi.hostByName("localhost", lo);
+  configTzTime(TZ_VILNIUS, "pool.ntp.org", "time.google.com");
   if (MDNS.begin(HOSTNAME)) MDNS.addService("skambutis", "tcp", 80);
   WiFi.setSleep(false);  // be energijos taupymo API atsako per ms, ne šimtus ms
   webStarted = true;
@@ -723,8 +733,7 @@ void setup() {
     logf("sugeneruotas PIN %s – pakeisti galima WiFi nustatymų puslapyje arba programoje", p);
   }
 
-  sntp_set_time_sync_notification_cb([](struct timeval*) { ntpSynced = true; });
-  configTzTime(TZ_VILNIUS, "pool.ntp.org", "time.google.com");
+  sntp_set_time_sync_notification_cb([](struct timeval*) { ntpSynced = true; });  // SNTP paleidžia startWeb()
   // laikas iš DS3231, kol nėra interneto; "sustojęs" laikrodžiu nepasitikim
   rtcOk = rtcBegin(RTC_SDA, RTC_SCL);
   time_t t;
@@ -806,7 +815,7 @@ void loop() {
   }
 
   static uint32_t nextUpdateCheck = 180000;  // pirmas – 3 min po įsijungimo, paskui kas valandą
-  if (!pending && webStarted && (updateRequested || millis() > nextUpdateCheck)) {
+  if (!pending && webStarted && WiFi.status() == WL_CONNECTED && (updateRequested || millis() > nextUpdateCheck)) {
     updateRequested = false;
     nextUpdateCheck = millis() + (checkUpdate() ? 3600000 : 900000);
   }
