@@ -26,8 +26,6 @@ mock_device.serve(8099)
 app = skambutis.App()
 app.geometry("900x640+60+40")
 app.attributes("-topmost", True)
-app.ip_var.set("skambutis-esp (127.0.0.1:8099)")
-app.pin_var.set("1234")
 
 
 def pump(seconds=0.6, until=None, timeout=20):
@@ -48,8 +46,10 @@ def shot(window, name):
     print("nuotrauka:", name)
 
 
-pump(1)
+pump(5)  # pirmas paleidimas: tušti laukai, paieška tinkle (CI nieko neranda)
 shot(app, "00-neprisijungta")
+app.ip_var.set("skambutis-esp (127.0.0.1:8099)")
+app.pin_var.set("1234")
 app.connect()
 pump(until=lambda: app.cfg is not None and app.conn.get().startswith("Prisijungta"))
 app.refresh_status()
