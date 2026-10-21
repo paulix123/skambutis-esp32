@@ -1,0 +1,26 @@
+# Instrukcijos ekrano nuotraukos: Skambutis.exe langas Windows'e prieš bandomąjį įrenginį -> artifact "nuotraukos"
+name: Instrukcijos nuotraukos
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["app/**", "tools/mock_device.py", ".github/workflows/docs-screenshots.yml"]
+
+jobs:
+  shots:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install zeroconf miniaudio lameenc numpy requests pillow
+      - name: Nuotraukos
+        timeout-minutes: 5
+        run: python app/screenshots.py nuotraukos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuotraukos
+          path: nuotraukos/*.png
